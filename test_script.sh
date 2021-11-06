@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m torch.distributed.launch --nproc_per_node=4 train.py --dataset Mass_Shape --img_size 224 --split overlap --num_steps 10 --fp16 --name test --data_root . --pretrained_dir 'ViT-B_16.npz'

@@ -18,10 +18,11 @@ from torch.utils.tensorboard import SummaryWriter
 from apex import amp
 from apex.parallel import DistributedDataParallel as DDP
 
-from models.modeling import VisionTransformer, CONFIGS
-from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
-from utils.data_utils import get_loader
-from utils.dist_util import get_world_size
+from TransFG.models.modeling import VisionTransformer, CONFIGS
+from TransFG.utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
+from TransFG.utils.data_utils import get_loader
+from TransFG.utils.dist_util import get_world_size
+from features_classification.train_utils import compute_classes_weights
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +83,17 @@ def setup(args):
         num_classes = 120
     elif args.dataset == "INat2017":
         num_classes = 5089
+    elif args.dataset == "Mass_Shape":
+        num_classes = 8
+    elif args.dataset == "Mass_Margins":
+        num_classes = 5
+    elif args.dataset == "Calc_Type":
+        num_classes = 14
+    elif args.dataset == 'Calc_Dist':
+        num_classes = 5
 
-    model = VisionTransformer(config, args.img_size, zero_head=True, num_classes=num_classes,                                                   smoothing_value=args.smoothing_value)
+    model = VisionTransformer(config, args.img_size, zero_head=True, num_classes=num_classes,
+                              smoothing_value=args.smoothing_value)
 
     model.load_from(np.load(args.pretrained_dir))
     if args.pretrained_model is not None:
@@ -108,6 +118,65 @@ def set_seed(args):
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
+
+def predict(args, model, writer, test_loader):
+    # Validation!
+    eval_losses = AverageMeter()
+
+    logger.info("***** Running Validation *****")
+    logger.info("  Num steps = %d", len(test_loader))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+
+    model.eval()
+    all_preds, all_label = [], []
+    all_paths = []
+    epoch_iterator = tqdm(test_loader,
+                          desc="Validating... (loss=X.X)",
+                          bar_format="{l_bar}{r_bar}",
+                          dynamic_ncols=True,
+                          disable=args.local_rank not in [-1, 0])
+    loss_fct = torch.nn.CrossEntropyLoss()
+    for step, batch in enumerate(epoch_iterator):
+        if args.dataset in ['Mass_Shape', 'Mass_Margins', 'Calc_Type', 'Calc_Dist']:
+            x = batch['image']
+            y = batch['label']
+            x = x.to(args.device)
+            y = y.to(args.device)
+
+            img_path = batch['img_path']
+        else:
+            batch = tuple(t.to(args.device) for t in batch)
+            x, y = batch
+
+        with torch.no_grad():
+            logits = model(x)
+
+            eval_loss = loss_fct(logits, y)
+            eval_loss = eval_loss.mean()
+            eval_losses.update(eval_loss.item())
+
+            preds = torch.argmax(logits, dim=-1)
+
+        if len(all_preds) == 0:
+            all_preds.append(logits.detach().cpu().numpy())
+            all_label.append(y.detach().cpu().numpy())
+        else:
+            all_preds[0] = np.append(
+                all_preds[0], logits.detach().cpu().numpy(), axis=0
+            )
+            all_label[0] = np.append(
+                all_label[0], y.detach().cpu().numpy(), axis=0
+            )
+
+        all_paths += img_path
+        epoch_iterator.set_description("Validating... (loss=%2.5f)" % eval_losses.val)
+
+
+    all_preds, all_label = all_preds[0], all_label[0]
+
+    return all_preds, all_label, all_paths
+
+
 def valid(args, model, writer, test_loader, global_step):
     # Validation!
     eval_losses = AverageMeter()
@@ -125,8 +194,15 @@ def valid(args, model, writer, test_loader, global_step):
                           disable=args.local_rank not in [-1, 0])
     loss_fct = torch.nn.CrossEntropyLoss()
     for step, batch in enumerate(epoch_iterator):
-        batch = tuple(t.to(args.device) for t in batch)
-        x, y = batch
+        if args.dataset in ['Mass_Shape', 'Mass_Margins', 'Calc_Type', 'Calc_Dist']:
+            x = batch['image']
+            y = batch['label']
+            x = x.to(args.device)
+            y = y.to(args.device)
+        else:
+            batch = tuple(t.to(args.device) for t in batch)
+            x, y = batch
+
         with torch.no_grad():
             logits = model(x)
 
@@ -174,7 +250,17 @@ def train(args, model):
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
 
     # Prepare dataset
-    train_loader, test_loader = get_loader(args)
+    train_loader, test_loader, classes, train_dir = get_loader(args)
+
+    # Calculate Classes weights
+    classes_weights = None
+    if args.weighted_classes:
+        classes_weights = compute_classes_weights(
+                    data_root=train_dir, classes_names=classes)
+        print(classes_weights)
+        classes_weights = torch.from_numpy(
+            classes_weights).type(torch.FloatTensor)
+        classes_weights = classes_weights.to(args.device)
 
     # Prepare optimizer and scheduler
     optimizer = torch.optim.SGD(model.parameters(),
@@ -220,10 +306,24 @@ def train(args, model):
                               disable=args.local_rank not in [-1, 0])
         all_preds, all_label = [], []
         for step, batch in enumerate(epoch_iterator):
-            batch = tuple(t.to(args.device) for t in batch)
-            x, y = batch
+            if args.dataset in ['Mass_Shape', 'Mass_Margins', 'Calc_Type', 'Calc_Dist']:
+                x = batch['image']
+                y = batch['label']
+                x = x.to(args.device)
+                y = y.to(args.device)
 
-            loss, logits = model(x, y)
+                if args.criterion == 'bce':
+                    binarized_y = batch['binarized_multilabel']
+                    binarized_y = binarized_y.to(args.device)
+
+            else:
+                batch = tuple(t.to(args.device) for t in batch)
+                x, y = batch
+
+            if args.criterion == 'bce':
+                loss, logits = model(x, y, binarized_y, args.criterion, classes_weights)
+            else:
+                loss, logits = model(x, y, binarized_y, args.criterion, classes_weights)
             loss = loss.mean()
 
             preds = torch.argmax(logits, dim=-1)
@@ -298,7 +398,7 @@ def main():
     # Required parameters
     parser.add_argument("--name", required=True,
                         help="Name of this run. Used for monitoring.")
-    parser.add_argument("--dataset", choices=["CUB_200_2011", "car", "dog", "nabirds", "INat2017"], default="CUB_200_2011",
+    parser.add_argument("--dataset", choices=["Mass_Shape", "Mass_Margins", "Calc_Type", "Calc_Dist", "CUB_200_2011", "car", "dog", "nabirds", "INat2017"], default="CUB_200_2011",
                         help="Which dataset.")
     parser.add_argument('--data_root', type=str, default='/opt/tiger/minist')
     parser.add_argument("--model_type", choices=["ViT-B_16", "ViT-B_32", "ViT-L_16",
@@ -357,6 +457,12 @@ def main():
                         help="Split method")
     parser.add_argument('--slide_step', type=int, default=12,
                         help="Slide step for overlap split")
+
+    parser.add_argument("--crt", "--criterion", dest="criterion", type=str, default="ce",
+                      help="Choose criterion: ce, bce")
+    parser.add_argument("--wc", "--weighted_classes", dest="weighted_classes",
+                    default=False, action='store_true',
+                    help="enable if you want to train with classes weighting")
 
     args = parser.parse_args()
 

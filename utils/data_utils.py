@@ -9,6 +9,9 @@ from torch.utils.data import DataLoader, RandomSampler, DistributedSampler, Sequ
 
 from .dataset import CUB, CarsDataset, NABirds, dogs, INat2017
 from .autoaugment import AutoAugImageNetPolicy
+from features_classification.datasets import Mass_Shape_Dataset, Mass_Margins_Dataset
+from features_classification.datasets import Calc_Type_Dataset, Calc_Dist_Dataset
+from features_classification import custom_transforms
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +20,77 @@ def get_loader(args):
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
-    if args.dataset == 'CUB_200_2011':
+    if args.dataset in ['Mass_Shape', 'Mass_Margins', 'Calc_Type', 'Calc_Dist']:
+        input_size = args.img_size
+        data_transforms = {
+            'train': transforms.Compose([
+                transforms.Resize((input_size, input_size)),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.RandomAffine(25, scale=(0.8, 1.2)),
+                custom_transforms.IntensityShift((-20, 20)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            ]),
+            'val': transforms.Compose([
+                transforms.Resize((input_size, input_size)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            ]),
+            'test': transforms.Compose([
+                transforms.Resize((input_size, input_size)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            ]),
+        }
+
+        root_dir = '/home/hqvo2/Projects/Breast_Cancer/data/processed_data2'
+
+        if args.dataset == 'Mass_Shape':
+            mass_shape_dir = 'mass/cls/mass_shape_comb_feats_omit'
+
+            trainset = Mass_Shape_Dataset(os.path.join(root_dir, mass_shape_dir, 'train'),
+                                        data_transforms['train'])
+            testset = Mass_Shape_Dataset(os.path.join(root_dir, mass_shape_dir, 'val'),
+                                        data_transforms['val'])
+
+            classes = Mass_Shape_Dataset.classes
+            train_dir = os.path.join(os.path.join(root_dir, mass_shape_dir), 'train')
+
+        elif args.dataset == 'Mass_Margins':
+            mass_margins_dir = 'mass/cls/mass_margins_comb_feats_omit'
+
+            trainset = Mass_Margins_Dataset(os.path.join(root_dir, mass_margins_dir, 'train'),
+                                            data_transforms['train'])
+            testset = Mass_Margins_Dataset(os.path.join(root_dir, mass_margins_dir, 'val'),
+                                           data_transforms['val'])
+
+            classes = Mass_Margins_Dataset.classes
+            train_dir = os.path.join(os.path.join(root_dir, mass_margins_dir), 'train')
+
+        elif args.dataset == 'Calc_Type':
+            calc_type_dir = 'calc/cls/calc_type_comb_feats_omit'
+
+            trainset = Calc_Type_Dataset(os.path.join(root_dir, calc_type_dir, 'train'),
+                                         data_transforms['train'])
+            testset = Calc_Type_Dataset(os.path.join(root_dir, calc_type_dir, 'val'),
+                                        data_transforms['val'])
+
+            classes = Calc_Type_Dataset.classes
+            train_dir = os.path.join(os.path.join(root_dir, calc_type_dir), 'train')
+
+        elif args.dataset == 'Calc_Dist':
+            calc_dist_dir = 'calc/cls/calc_dist_comb_feats_omit'
+
+            trainset = Calc_Dist_Dataset(os.path.join(root_dir, calc_dist_dir, 'train'),
+                                         data_transforms['train'])
+            testset = Calc_Dist_Dataset(os.path.join(root_dir, calc_dist_dir, 'val'),
+                                        data_transforms['val'])
+
+            classes = Calc_Dist_Dataset.classes
+            train_dir = os.path.join(os.path.join(root_dir, calc_dist_dir), 'train')
+
+    elif args.dataset == 'CUB_200_2011':
         train_transform=transforms.Compose([transforms.Resize((600, 600), Image.BILINEAR),
                                     transforms.RandomCrop((448, 448)),
                                     transforms.RandomHorizontalFlip(),
@@ -117,4 +190,4 @@ def get_loader(args):
                              num_workers=4,
                              pin_memory=True) if testset is not None else None
 
-    return train_loader, test_loader
+    return train_loader, test_loader, classes, train_dir

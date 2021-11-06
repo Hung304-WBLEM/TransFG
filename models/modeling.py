@@ -18,7 +18,7 @@ from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNo
 from torch.nn.modules.utils import _pair
 from scipy import ndimage
 
-import models.configs as configs
+import TransFG.models.configs as configs
 
 logger = logging.getLogger(__name__)
 
@@ -296,18 +296,24 @@ class VisionTransformer(nn.Module):
         self.transformer = Transformer(config, img_size)
         self.part_head = Linear(config.hidden_size, num_classes)
 
-    def forward(self, x, labels=None):
+    def forward(self, x, labels=None, binarized_labels=None, criterion=None, classes_weights=None):
         part_tokens = self.transformer(x)
         part_logits = self.part_head(part_tokens[:, 0])
 
         if labels is not None:
-            if self.smoothing_value == 0:
-                loss_fct = CrossEntropyLoss()
+            if criterion == 'bce':
+                loss_fct = nn.BCEWithLogitsLoss(pos_weight=classes_weights)
+                part_loss = loss_fct(part_logits.view(-1, self.num_classes), binarized_labels)
             else:
-                loss_fct = LabelSmoothing(self.smoothing_value)
-            part_loss = loss_fct(part_logits.view(-1, self.num_classes), labels.view(-1))
+                if self.smoothing_value == 0:
+                    loss_fct = CrossEntropyLoss(weight=classes_weight)
+                else:
+                    loss_fct = LabelSmoothing(self.smoothing_value)
+
+                part_loss = loss_fct(part_logits.view(-1, self.num_classes), labels.view(-1))
             contrast_loss = con_loss(part_tokens[:, 0], labels.view(-1))
             loss = part_loss + contrast_loss
+
             return loss, part_logits
         else:
             return part_logits
