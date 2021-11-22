@@ -17,6 +17,7 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from apex import amp
 from apex.parallel import DistributedDataParallel as DDP
+# from torch.multiprocessing import set_start_method # for deadlock fix
 
 from TransFG.models.modeling import VisionTransformer, CONFIGS
 from TransFG.utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
@@ -498,4 +499,5 @@ def main():
     train(args, model)
 
 if __name__ == "__main__":
+    # set_start_method('spawn') # for deadlock fix
     main()
